@@ -8,6 +8,7 @@ from utils import str2bool
 import numpy as np
 import random
 
+
 def get_parser():
     """Get default arguments."""
     parser = configargparse.ArgumentParser(
@@ -51,6 +52,7 @@ def get_parser():
     parser.add_argument('--transfer_loss', type=str, default='mmd')
     return parser
 
+
 def set_random_seed(seed=0):
     # seed setting
     random.seed(seed)
@@ -59,6 +61,7 @@ def set_random_seed(seed=0):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
 
 def load_data(args):
     '''
@@ -74,10 +77,12 @@ def load_data(args):
         folder_tgt, args.batch_size, infinite_data_loader=False, train=False, num_workers=args.num_workers)
     return source_loader, target_train_loader, target_test_loader, n_class
 
+
 def get_model(args):
     model = models.TransferNet(
         args.n_class, transfer_loss=args.transfer_loss, base_net=args.backbone, max_iter=args.max_iter, use_bottleneck=args.use_bottleneck).to(args.device)
     return model
+
 
 def get_optimizer(model, args):
     initial_lr = args.lr if not args.lr_scheduler else 1.0
@@ -85,9 +90,11 @@ def get_optimizer(model, args):
     optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
     return optimizer
 
+
 def get_scheduler(optimizer, args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x:  args.lr * (1. + args.lr_gamma * float(x)) ** (-args.lr_decay))
     return scheduler
+
 
 def test(model, target_test_loader, args):
     model.eval()
@@ -106,53 +113,87 @@ def test(model, target_test_loader, args):
     acc = 100. * correct / len_target_dataset
     return acc, test_loss.avg
 
+
 def train(source_loader, target_train_loader, target_test_loader, model, optimizer, lr_scheduler, args):
+    """
+    训练函数.
+    训练日志文件：train_log.csv，每行记录一个epoch的clf_loss, transfer_loss, total_loss
+
+    Args:
+        source_loader: 源域数据加载器
+        target_train_loader: 目标域训练数据加载器
+        target_test_loader: 目标域测试数据加载器
+        model: 模型
+        optimizer: 优化器
+        lr_scheduler: 学习率调度器
+        args: 其他参数字典
+
+    Returns:
+        None
+
+    """
+    # 数据集参数
     len_source_loader = len(source_loader)
     len_target_loader = len(target_train_loader)
     n_batch = min(len_source_loader, len_target_loader)
     if n_batch == 0:
         n_batch = args.n_iter_per_epoch 
-    
+
+    # 数据迭代器
     iter_source, iter_target = iter(source_loader), iter(target_train_loader)
 
+    # 训练参数
     best_acc = 0
     stop = 0
     log = []
+
+    # 每个epoch的训练
     for e in range(1, args.n_epoch+1):
         model.train()
-        train_loss_clf = utils.AverageMeter()
-        train_loss_transfer = utils.AverageMeter()
-        train_loss_total = utils.AverageMeter()
-        model.epoch_based_processing(n_batch)
+        train_loss_clf = utils.AverageMeter()           # 分类损失
+        train_loss_transfer = utils.AverageMeter()      # 迁移损失
+        train_loss_total = utils.AverageMeter()         # 总损失
+
+        model.epoch_based_processing(n_batch)           # 每个epoch的处理
         
         if max(len_target_loader, len_source_loader) != 0:
             iter_source, iter_target = iter(source_loader), iter(target_train_loader)
-        
-        criterion = torch.nn.CrossEntropyLoss()
+
+        criterion = torch.nn.CrossEntropyLoss()         # 交叉熵损失
+
+        # 每个batch的训练
         for _ in range(n_batch):
-            data_source, label_source = next(iter_source) # .next()
-            data_target, _ = next(iter_target) # .next()
+
+            # batch数据
+            data_source, label_source = next(iter_source)   # .next()
+            data_target, _ = next(iter_target)              # .next()
             data_source, label_source = data_source.to(
                 args.device), label_source.to(args.device)
             data_target = data_target.to(args.device)
-            
+
+            # 前向传播
             clf_loss, transfer_loss = model(data_source, data_target, label_source)
             loss = clf_loss + args.transfer_loss_weight * transfer_loss
-            
+
+            # 反向传播
             optimizer.zero_grad()
             loss.backward()
+
+            # 更新参数
             optimizer.step()
             if lr_scheduler:
                 lr_scheduler.step()
 
+            # 记录损失
             train_loss_clf.update(clf_loss.item())
             train_loss_transfer.update(transfer_loss.item())
             train_loss_total.update(loss.item())
-            
+
+        # 记录训练日志
         log.append([train_loss_clf.avg, train_loss_transfer.avg, train_loss_total.avg])
-        
         info = 'Epoch: [{:2d}/{}], cls_loss: {:.4f}, transfer_loss: {:.4f}, total_Loss: {:.4f}'.format(
                         e, args.n_epoch, train_loss_clf.avg, train_loss_transfer.avg, train_loss_total.avg)
+
         # Test
         stop += 1
         test_acc, test_loss = test(model, target_test_loader, args)
@@ -165,28 +206,42 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
         if args.early_stop > 0 and stop >= args.early_stop:
             print(info)
             break
+
         print(info)
     print('Transfer result: {:.4f}'.format(best_acc))
 
+
 def main():
+    # 获取参数
     parser = get_parser()
     args = parser.parse_args()
     setattr(args, "device", torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     print(args)
+
+    # 设置随机种子
     set_random_seed(args.seed)
+
+    # 加载数据
     source_loader, target_train_loader, target_test_loader, n_class = load_data(args)
     setattr(args, "n_class", n_class)
+
+    # 获取模型
     if args.epoch_based_training:
         setattr(args, "max_iter", args.n_epoch * min(len(source_loader), len(target_train_loader)))
     else:
         setattr(args, "max_iter", args.n_epoch * args.n_iter_per_epoch)
     model = get_model(args)
+
+    # 获取优化器
     optimizer = get_optimizer(model, args)
-    
+
+    # 获取学习率调度器
     if args.lr_scheduler:
         scheduler = get_scheduler(optimizer, args)
     else:
         scheduler = None
+
+    # 训练
     train(source_loader, target_train_loader, target_test_loader, model, optimizer, scheduler, args)
     
 
